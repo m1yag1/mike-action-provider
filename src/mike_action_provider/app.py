@@ -19,6 +19,11 @@ def create_app():
 
     # Register blueprints
     app.register_blueprint(aptb)
+
+    @app.route("/ping")
+    def ping():
+        return {"message": "pong"}
+
     return app
 
 

@@ -1,6 +1,4 @@
-from datetime import datetime, timezone
-from typing import Dict, List, Set
-
+import datetime as dt
 from flask import request
 from pydantic import BaseModel, Field
 
@@ -24,6 +22,37 @@ from globus_action_provider_tools.flask.types import (
 
 from .backend import simple_backend
 from .config import get_config
+
+# sleep time in seconds
+MAX_SLEEP_TIME = 60
+
+
+def utc_now() -> dt.datetime:
+    """Get current UTC time.
+
+    Returns:
+        dt.datetime: Current UTC time with timezone information.
+    """
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _update_action_status(action_status: ActionStatus) -> ActionStatus:
+    """Update action status if it has exceeded the maximum sleep time.
+
+    Args:
+        action_status (ActionStatus): The action status to update.
+
+    Returns:
+        ActionStatus: The updated action status.
+    """
+    now = utc_now()
+    start_time = dt.datetime.fromisoformat(action_status.start_time)
+    if now - start_time > dt.timedelta(seconds=MAX_SLEEP_TIME):
+        action_status.status = ActionStatusValue.SUCCEEDED
+        action_status.display_status = "Action completed"
+        action_status.completion_time = now.isoformat()
+        simple_backend[action_status.action_id] = action_status
+        return action_status
 
 
 class ActionProviderInput(BaseModel):
@@ -59,49 +88,6 @@ aptb = ActionProviderBlueprint(
 )
 
 
-@aptb.action_enumerate
-def action_enumeration(auth: AuthState, params: Dict[str, Set]) -> List[ActionStatus]:
-    """
-    This is an optional endpoint, useful for allowing requesters to enumerate
-    actions filtered by ActionStatus and role.
-
-    The params argument will always be a dict containing the incoming request's
-    validated query arguments. There will be two keys, 'statuses' and 'roles',
-    where each maps to a set containing the filter values for the key. A typical
-    params object will look like:
-
-        {
-            "statuses": {<ActionStatusValue.ACTIVE: 3>},
-            "roles": {"creator_id"}
-        }
-
-    Notice that the value for the "statuses" key is an Enum value.
-    """
-    statuses = params["statuses"]
-    roles = params["roles"]
-    matches = []
-
-    for _, action in simple_backend.items():
-        if action.status in statuses:
-            # Create a set of identities that are allowed to access this action,
-            # based on the roles being queried for
-            allowed_set = set()
-            for role in roles:
-                identities = getattr(action, role)
-                if isinstance(identities, str):
-                    allowed_set.add(identities)
-                else:
-                    allowed_set.update(identities)
-
-            # Determine if this request's auth allows access based on the
-            # allowed_set
-            authorized = auth.check_authorization(allowed_set)
-            if authorized:
-                matches.append(action)
-
-    return matches
-
-
 @aptb.action_run
 def my_action_run(
     action_request: ActionRequest, auth: AuthState
@@ -117,7 +103,7 @@ def my_action_run(
         label=action_request.label or None,
         monitor_by=action_request.monitor_by or auth.identities,
         manage_by=action_request.manage_by or auth.identities,
-        start_time=datetime.now(timezone.utc).isoformat(),
+        start_time=utc_now().isoformat(),
         completion_time=None,
         release_after=action_request.release_after or "P30D",
         display_status=ActionStatusValue.ACTIVE,
@@ -133,11 +119,16 @@ def my_action_status(action_id: str, auth: AuthState) -> ActionCallbackReturn:
     Query for the action_id in some storage backend to return the up-to-date
     ActionStatus. It's possible that some ActionProviders will require querying
     an external system to get up to date information on an Action's status.
+
+    We will count the number of status checks and if it exceeds MAX_SLEEP_TIME,
+    the action status will be changed to SUCCEEDED.
     """
     action_status = simple_backend.get(action_id)
     if action_status is None:
         raise ActionNotFound(f"No action with {action_id}")
     authorize_action_access_or_404(action_status, auth)
+    if action_status.status == ActionStatusValue.ACTIVE:
+        action_status = _update_action_status(action_status)
     return action_status
 
 
