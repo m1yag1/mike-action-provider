@@ -1,6 +1,9 @@
+"""Flask blueprint for the action provider."""
 import datetime as dt
+import json
 from flask import request
 from pydantic import BaseModel, Field
+from typing import Dict, Any
 
 from globus_action_provider_tools import (
     ActionProviderDescription,
@@ -20,11 +23,18 @@ from globus_action_provider_tools.flask.types import (
     ActionLogReturn,
 )
 
-from .backend import simple_backend
 from .config import get_config
+from mike_action_provider.db.connection import get_db
+from mike_action_provider.db.crud import (
+    create_action_status,
+    get_action_status,
+    update_action_status,
+    delete_action_status,
+)
+
 
 # sleep time in seconds
-MAX_SLEEP_TIME = 60
+MAX_SLEEP_TIME = 120
 
 
 def utc_now() -> dt.datetime:
@@ -36,22 +46,48 @@ def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
-def _update_action_status(action_status: ActionStatus) -> ActionStatus:
+def _update_action_status(action_status: ActionStatus, request_body: Dict[str, Any]) -> ActionStatus:
     """Update action status if it has exceeded the maximum sleep time.
 
     Args:
         action_status (ActionStatus): The action status to update.
+        request_data (Dict[str, Any]): The original request data containing UTC offset.
 
     Returns:
         ActionStatus: The updated action status.
     """
     now = utc_now()
-    start_time = dt.datetime.fromisoformat(action_status.start_time)
-    if now - start_time > dt.timedelta(seconds=MAX_SLEEP_TIME):
+    start_time = dt.datetime.fromisoformat(action_status.start_time).replace(tzinfo=dt.timezone.utc)
+    time_diff = now - start_time
+    print(f"Time difference: {time_diff.total_seconds()} seconds")
+    print(f"MAX_SLEEP_TIME: {MAX_SLEEP_TIME} seconds")
+    if time_diff > dt.timedelta(seconds=MAX_SLEEP_TIME):
         action_status.status = ActionStatusValue.SUCCEEDED
         action_status.display_status = "Action completed"
         action_status.completion_time = now.isoformat()
-        simple_backend[action_status.action_id] = action_status
+
+        if request_body.get("utc_offset"):
+            offset_hours = int(request_body["utc_offset"])
+            # For negative offsets, we need to subtract the hours
+            if offset_hours < 0:
+                local_time = start_time - dt.timedelta(hours=abs(offset_hours))
+            else:
+                local_time = start_time + dt.timedelta(hours=offset_hours)
+            action_status.details = {
+                "utc_offset": request_body["utc_offset"],
+                "utc_time": start_time.isoformat(),
+                "local_time": local_time.isoformat(),
+            }
+
+        with get_db() as db:
+            update_action_status(
+                db=db,
+                action_id=action_status.action_id,
+                status=action_status.status,
+                display_status=action_status.display_status,
+                completion_time=now,
+                details=json.dumps(action_status.details),
+            )
         return action_status
 
 
@@ -92,8 +128,8 @@ aptb = ActionProviderBlueprint(
 def my_action_run(
     action_request: ActionRequest, auth: AuthState
 ) -> ActionCallbackReturn:
-    """
-    Implement custom business logic related to instantiating an Action here.
+    """Implement custom business logic related to instantiating an Action here.
+
     Once launched, collect details on the Action and create an ActionStatus
     which records information on the instantiated Action and gets stored.
     """
@@ -109,90 +145,141 @@ def my_action_run(
         display_status=ActionStatusValue.ACTIVE,
         details={},
     )
-    simple_backend[action_status.action_id] = action_status
+
+    # Store in database
+    with get_db() as db:
+        create_action_status(
+            db=db,
+            action_id=action_status.action_id,
+            status=action_status.status,
+            creator_id=action_status.creator_id,
+            monitor_by=",".join(action_status.monitor_by),
+            manage_by=",".join(action_status.manage_by),
+            release_after=str(action_status.release_after),
+            display_status=action_status.display_status,
+            request_json=request.get_json(),
+            label=action_status.label,
+            details=action_status.details,
+        )
+
     return action_status
 
 
 @aptb.action_status
 def my_action_status(action_id: str, auth: AuthState) -> ActionCallbackReturn:
-    """
-    Query for the action_id in some storage backend to return the up-to-date
-    ActionStatus. It's possible that some ActionProviders will require querying
-    an external system to get up to date information on an Action's status.
+    """Query for the action_id in the database to return the up-to-date ActionStatus.
 
-    We will count the number of status checks and if it exceeds MAX_SLEEP_TIME,
-    the action status will be changed to SUCCEEDED.
+    We will determine if the action has exceeded MAX_SLEEP_TIME,
+    if so, the action status will be changed to SUCCEEDED.
     """
-    action_status = simple_backend.get(action_id)
-    if action_status is None:
-        raise ActionNotFound(f"No action with {action_id}")
-    authorize_action_access_or_404(action_status, auth)
-    if action_status.status == ActionStatusValue.ACTIVE:
-        action_status = _update_action_status(action_status)
-    return action_status
+    with get_db() as db:
+        db_action = get_action_status(db, action_id)
+        if db_action is None:
+            raise ActionNotFound(f"No action with {action_id}")
+
+        action_status = ActionStatus(
+            action_id=db_action.action_id,
+            status=db_action.status,
+            creator_id=db_action.creator_id,
+            label=db_action.label,
+            monitor_by=set(db_action.monitor_by.split(",")),
+            manage_by=set(db_action.manage_by.split(",")),
+            start_time=db_action.start_time.isoformat(),
+            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            release_after=db_action.release_after,
+            display_status=db_action.display_status,
+            details=json.loads(db_action.details) if db_action.details else {},
+        )
+
+        authorize_action_access_or_404(action_status, auth)
+        if action_status.status == ActionStatusValue.ACTIVE:
+            request_data = db_action.request_json
+            action_status = _update_action_status(action_status, request_data.get("body"))
+        return action_status
 
 
 @aptb.action_cancel
 def my_action_cancel(action_id: str, auth: AuthState) -> ActionCallbackReturn:
-    """
+    """Cancel an action.
+
     Only Actions that are not in a completed state may be cancelled.
     Cancellations do not necessarily require that an Action's execution be
     stopped. Once cancelled, the ActionStatus object should be updated and
     stored.
     """
-    action_status = simple_backend.get(action_id)
-    if action_status is None:
-        raise ActionNotFound(f"No action with {action_id}")
+    with get_db() as db:
+        db_action = get_action_status(db, action_id)
+        if db_action is None:
+            raise ActionNotFound(f"No action with {action_id}")
 
-    authorize_action_management_or_404(action_status, auth)
-    if action_status.is_complete():
-        raise ActionConflict("Cannot cancel complete action")
+        action_status = ActionStatus(
+            action_id=db_action.action_id,
+            status=db_action.status,
+            creator_id=db_action.creator_id,
+            label=db_action.label,
+            monitor_by=set(db_action.monitor_by.split(",")),
+            manage_by=set(db_action.manage_by.split(",")),
+            start_time=db_action.start_time.isoformat(),
+            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            release_after=db_action.release_after,
+            display_status=db_action.display_status,
+            details=db_action.details,
+        )
 
-    action_status.status = ActionStatusValue.FAILED
-    action_status.display_status = f"Cancelled by {auth.effective_identity}"
-    simple_backend[action_id] = action_status
-    return action_status
+        authorize_action_management_or_404(action_status, auth)
+        if action_status.is_complete():
+            raise ActionConflict("Cannot cancel complete action")
+
+        action_status.status = ActionStatusValue.FAILED
+        action_status.display_status = f"Cancelled by {auth.effective_identity}"
+
+        update_action_status(
+            db=db,
+            action_id=action_id,
+            status=action_status.status,
+            display_status=action_status.display_status,
+        )
+
+        return action_status
 
 
 @aptb.action_release
 def my_action_release(action_id: str, auth: AuthState) -> ActionCallbackReturn:
-    """
+    """Release an action.
+
     Only Actions that are in a completed state may be released. The release
-    operation removes the ActionStatus object from the data store. The final, up
-    to date ActionStatus is returned after a successful release.
+    operation marks the ActionStatus object as released in the data store.
+    The final, up to date ActionStatus is returned after a successful release.
     """
-    action_status = simple_backend.get(action_id)
-    if action_status is None:
-        raise ActionNotFound(f"No action with {action_id}")
+    with get_db() as db:
+        db_action = get_action_status(db, action_id)
+        if db_action is None:
+            raise ActionNotFound(f"No action with {action_id}")
 
-    authorize_action_management_or_404(action_status, auth)
-    if not action_status.is_complete():
-        raise ActionConflict("Cannot release incomplete Action")
+        action_status = ActionStatus(
+            action_id=db_action.action_id,
+            status=db_action.status,
+            creator_id=db_action.creator_id,
+            label=db_action.label,
+            monitor_by=set(db_action.monitor_by.split(",")),
+            manage_by=set(db_action.manage_by.split(",")),
+            start_time=db_action.start_time.isoformat(),
+            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            release_after=db_action.release_after,
+            display_status=db_action.display_status,
+            details=json.loads(db_action.details) if db_action.details else {},
+        )
 
-    action_status.display_status = f"Released by {auth.effective_identity}"
-    simple_backend.pop(action_id)
-    return action_status
+        authorize_action_management_or_404(action_status, auth)
+        if not action_status.is_complete():
+            raise ActionConflict("Cannot release incomplete Action")
 
-
-@aptb.action_log
-def my_action_log(action_id: str, auth: AuthState) -> ActionLogReturn:
-    """
-    Action Providers can optionally support a logging endpoint to return
-    detailed information on an Action's execution history. Pagination and
-    filters are supported as query parameters and can be used to control what
-    details are returned to the requester.
-    """
-    pagination = request.args.get("pagination")
-    filters = request.args.get("filters")
-    return ActionLogReturn(
-        code=200,
-        description=f"This is an example of a detailed log entry for {action_id}",
-        **{
-            "time": "TODAY",
-            "details": {
-                "action_id": "Transfer",
-                "filters": filters,
-                "pagination": pagination,
-            },
-        },
-    )
+        action_status.display_status = f"Released by {auth.effective_identity}"
+        # We soft delete the action status by setting is_released to True
+        update_action_status(
+            db=db,
+            action_id=action_id,
+            display_status=action_status.display_status,
+            is_released=True,
+        )
+        return action_status
