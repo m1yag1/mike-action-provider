@@ -49,7 +49,15 @@ An installation link has been provided to each of them.
    cp local.example.env local.env
    ```
 
-3. Run the project with the following command:
+3. Create the database `./data/actions.db` by running the following command:
+
+```shell
+uv run python manage.py reset-db
+```
+
+4. Run the project with the following command:
+
+
 
    ```shell
    uv run flask run --host localhost --port 5001
@@ -68,7 +76,12 @@ An installation link has been provided to each of them.
     * Debugger PIN: 103-387-468
    ```
 
-4. In a separate terminal, run the following `ngrok` command:
+    > Note: You can test that the server is running by running the following in a separate terminal and verifying the message is returned:
+    >```
+    >curl -L http://127.0.0.1:5001/ping
+    >```
+
+5. In a separate terminal, run the following `ngrok` command:
 
    ```shell
    ngrok http http://localhost:5001
@@ -88,7 +101,7 @@ An installation link has been provided to each of them.
    Region                        United States (us)
    Latency                       42ms
    Web Interface                 http://127.0.0.1:4040
-   Forwarding                    https://3a5e-74-193-31-82.ngrok-free.app -> http://localhost:5000
+   Forwarding                    https://3a5e-74-193-31-82.ngrok-free.app -> http://localhost:5001
    ```
 
 
@@ -121,6 +134,7 @@ An installation link has been provided to each of them.
 Run the following commands with `uv run manage.py <command>`:
 
 `list-routes` - Used to list all the routes provided by the action provider.
+`reset-db` - Used to completely delete the database and create it from scratch.
 
 
 ## Action Provider Routes
@@ -140,6 +154,7 @@ Run the following commands with `uv run manage.py <command>`:
 | apt.my_action_release   | DELETE,OPTIONS   | /apt/actions/<string:action_id>                   |
 | apt.my_action_log       | HEAD,GET,OPTIONS | /apt/<string:action_id>/log                       |
 | apt.my_action_log       | HEAD,GET,OPTIONS | /apt/actions/<string:action_id>/log               |
+| ping                    | GET,OPTIONS,HEAD | /ping
 
 
 [uv-install]: https://github.com/astral-sh/uv?tab=readme-ov-file#installation

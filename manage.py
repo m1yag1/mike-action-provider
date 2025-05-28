@@ -2,11 +2,8 @@
 import click
 from pathlib import Path
 
-from sqlalchemy import text
-
 from mike_action_provider.app import create_app
 from mike_action_provider.db.connection import get_engine, init_db
-from mike_action_provider.db.models import Base
 
 
 @click.group()
@@ -56,21 +53,18 @@ def reset_db():
         return
 
     if not click.confirm(
-        f"WARNING: This will delete all data in {db_path}. Are you sure?",
+        f"WARNING: This will delete the database file at {db_path}. "
+        "Are you sure?",
         default=False,
     ):
         click.echo("Operation cancelled.")
         return
 
-    # Drop all tables
-    with engine.connect() as conn:
-        conn.execute(text("PRAGMA foreign_keys = OFF"))
-        for table in reversed(Base.metadata.sorted_tables):
-            conn.execute(table.delete())
-        conn.execute(text("PRAGMA foreign_keys = ON"))
-        conn.commit()
+    # Delete the database file
+    db_path.unlink()
+    click.echo(f"Deleted database file at {db_path}")
 
-    # Recreate tables
+    # Create new database
     init_db()
     click.echo("Database has been reset.")
 
