@@ -12,7 +12,6 @@ An installation link has been provided to each of them.
 
 * [uv][uv-install]
 * [jq][jq-install]
-* [globus-cli][globus-cli-install]
 * [ngrok][ngrok-install]
 
 ## Quick Start
@@ -28,7 +27,7 @@ An installation link has been provided to each of them.
    > IMPORTANT❗: Replace `<ProjectName>` with your project name.
 
    ```shell
-   uv run ./scripts/create_globus_creds.sh <ProjectName>
+   ./scripts/create_globus_creds.sh <ProjectName>
    ```
 
    Example:
