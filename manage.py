@@ -1,4 +1,5 @@
 """Management script for the action provider."""
+
 import click
 from pathlib import Path
 
@@ -23,8 +24,8 @@ def _list_routes(app):
     """
     output = []
     for rule in app.url_map.iter_rules():
-        methods = ','.join(rule.methods)
-        output.append(f'{rule.endpoint} {methods} {rule.rule}')
+        methods = ",".join(rule.methods)
+        output.append(f"{rule.endpoint} {methods} {rule.rule}")
     return output
 
 
@@ -53,8 +54,7 @@ def reset_db():
         return
 
     if not click.confirm(
-        f"WARNING: This will delete the database file at {db_path}. "
-        "Are you sure?",
+        f"WARNING: This will delete the database file at {db_path}. " "Are you sure?",
         default=False,
     ):
         click.echo("Operation cancelled.")

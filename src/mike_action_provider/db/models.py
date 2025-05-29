@@ -1,4 +1,5 @@
 """SQLAlchemy models for the action provider."""
+
 from datetime import datetime
 from typing import Optional
 
@@ -8,6 +9,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     """Base class for all database models."""
+
     pass
 
 
@@ -33,6 +35,7 @@ class ActionStatus(Base):
         request_json (dict): The original JSON request that created this action
         is_released (bool): Indicates whether the action is released
     """
+
     __tablename__ = "action_statuses"
 
     action_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -49,6 +52,6 @@ class ActionStatus(Base):
     )
     release_after: Mapped[str] = mapped_column(String, nullable=False)
     display_status: Mapped[str] = mapped_column(String, nullable=False)
-    details: Mapped[str] = mapped_column(String, nullable=False, default="{}")
+    details: Mapped[str] = mapped_column(JSON, nullable=False, default="{}")
     request_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     is_released: Mapped[bool] = mapped_column(default=False, nullable=False)

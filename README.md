@@ -51,13 +51,11 @@ An installation link has been provided to each of them.
 
 3. Create the database `./data/actions.db` by running the following command:
 
-```shell
-uv run python manage.py reset-db
-```
+   ```shell
+   uv run python manage.py reset-db
+   ```
 
 4. Run the project with the following command:
-
-
 
    ```shell
    uv run flask run --host localhost --port 5001

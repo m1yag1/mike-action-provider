@@ -1,4 +1,5 @@
 """Flask blueprint for the action provider."""
+
 import datetime as dt
 import json
 from flask import request
@@ -29,24 +30,16 @@ from mike_action_provider.db.crud import (
     create_action_status,
     get_action_status,
     update_action_status,
-    delete_action_status,
 )
+from mike_action_provider.logging import get_logger
+from mike_action_provider.utils import utc_now
+
+logger = get_logger(__name__)
 
 
-# sleep time in seconds
-MAX_SLEEP_TIME = 120
-
-
-def utc_now() -> dt.datetime:
-    """Get current UTC time.
-
-    Returns:
-        dt.datetime: Current UTC time with timezone information.
-    """
-    return dt.datetime.now(dt.timezone.utc)
-
-
-def _update_action_status(action_status: ActionStatus, request_body: Dict[str, Any]) -> ActionStatus:
+def _update_action_status(
+    action_status: ActionStatus, request_body: Dict[str, Any]
+) -> ActionStatus:
     """Update action status if it has exceeded the maximum sleep time.
 
     Args:
@@ -57,11 +50,21 @@ def _update_action_status(action_status: ActionStatus, request_body: Dict[str, A
         ActionStatus: The updated action status.
     """
     now = utc_now()
-    start_time = dt.datetime.fromisoformat(action_status.start_time).replace(tzinfo=dt.timezone.utc)
+    # Ensure start_time is treated as UTC
+    start_time = dt.datetime.fromisoformat(action_status.start_time)
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=dt.timezone.utc)
     time_diff = now - start_time
-    print(f"Time difference: {time_diff.total_seconds()} seconds")
-    print(f"MAX_SLEEP_TIME: {MAX_SLEEP_TIME} seconds")
-    if time_diff > dt.timedelta(seconds=MAX_SLEEP_TIME):
+    total_seconds = time_diff.total_seconds()
+
+    if total_seconds > get_config().MAX_SLEEP_TIME:
+        logger.info(
+            "Action completed",
+            extra={
+                "action_id": action_status.action_id,
+                "duration_minutes": round(time_diff.total_seconds() / 60, 2),
+            },
+        )
         action_status.status = ActionStatusValue.SUCCEEDED
         action_status.display_status = "Action completed"
         action_status.completion_time = now.isoformat()
@@ -88,7 +91,7 @@ def _update_action_status(action_status: ActionStatus, request_body: Dict[str, A
                 completion_time=now,
                 details=json.dumps(action_status.details),
             )
-        return action_status
+    return action_status
 
 
 class ActionProviderInput(BaseModel):
@@ -133,13 +136,22 @@ def my_action_run(
     Once launched, collect details on the Action and create an ActionStatus
     which records information on the instantiated Action and gets stored.
     """
+    logger.info(
+        "Creating new action",
+        extra={
+            "creator_id": auth.effective_identity,
+            "label": action_request.label,
+        },
+    )
+
+    current_utc = utc_now()
     action_status = ActionStatus(
         status=ActionStatusValue.ACTIVE,
         creator_id=str(auth.effective_identity),
         label=action_request.label or None,
         monitor_by=action_request.monitor_by or auth.identities,
         manage_by=action_request.manage_by or auth.identities,
-        start_time=utc_now().isoformat(),
+        start_time=current_utc.isoformat(),
         completion_time=None,
         release_after=action_request.release_after or "P30D",
         display_status=ActionStatusValue.ACTIVE,
@@ -161,6 +173,10 @@ def my_action_run(
             label=action_status.label,
             details=action_status.details,
         )
+        logger.info(
+            "Action created successfully",
+            extra={"action_id": action_status.action_id},
+        )
 
     return action_status
 
@@ -172,9 +188,11 @@ def my_action_status(action_id: str, auth: AuthState) -> ActionCallbackReturn:
     We will determine if the action has exceeded MAX_SLEEP_TIME,
     if so, the action status will be changed to SUCCEEDED.
     """
+    logger.debug("Checking action status", extra={"action_id": action_id})
     with get_db() as db:
         db_action = get_action_status(db, action_id)
         if db_action is None:
+            logger.warning("Action not found", extra={"action_id": action_id})
             raise ActionNotFound(f"No action with {action_id}")
 
         action_status = ActionStatus(
@@ -185,16 +203,29 @@ def my_action_status(action_id: str, auth: AuthState) -> ActionCallbackReturn:
             monitor_by=set(db_action.monitor_by.split(",")),
             manage_by=set(db_action.manage_by.split(",")),
             start_time=db_action.start_time.isoformat(),
-            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            completion_time=(
+                db_action.completion_time.replace(tzinfo=dt.timezone.utc).isoformat()
+                if db_action.completion_time
+                else None
+            ),
             release_after=db_action.release_after,
-            display_status=db_action.display_status,
+            display_status=db_action.display_status[:64],
             details=json.loads(db_action.details) if db_action.details else {},
         )
 
         authorize_action_access_or_404(action_status, auth)
         if action_status.status == ActionStatusValue.ACTIVE:
             request_data = db_action.request_json
-            action_status = _update_action_status(action_status, request_data.get("body"))
+            action_status = _update_action_status(
+                action_status, request_data.get("body")
+            )
+        logger.debug(
+            "Action status retrieved",
+            extra={
+                "action_id": action_id,
+                "status": action_status.status,
+            },
+        )
         return action_status
 
 
@@ -207,9 +238,11 @@ def my_action_cancel(action_id: str, auth: AuthState) -> ActionCallbackReturn:
     stopped. Once cancelled, the ActionStatus object should be updated and
     stored.
     """
+    logger.info("Cancelling action", extra={"action_id": action_id})
     with get_db() as db:
         db_action = get_action_status(db, action_id)
         if db_action is None:
+            logger.warning("Action not found", extra={"action_id": action_id})
             raise ActionNotFound(f"No action with {action_id}")
 
         action_status = ActionStatus(
@@ -220,14 +253,25 @@ def my_action_cancel(action_id: str, auth: AuthState) -> ActionCallbackReturn:
             monitor_by=set(db_action.monitor_by.split(",")),
             manage_by=set(db_action.manage_by.split(",")),
             start_time=db_action.start_time.isoformat(),
-            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            completion_time=(
+                db_action.completion_time.replace(tzinfo=dt.timezone.utc).isoformat()
+                if db_action.completion_time
+                else None
+            ),
             release_after=db_action.release_after,
-            display_status=db_action.display_status,
+            display_status=db_action.display_status[:64],
             details=db_action.details,
         )
 
         authorize_action_management_or_404(action_status, auth)
         if action_status.is_complete():
+            logger.warning(
+                "Cannot cancel completed action",
+                extra={
+                    "action_id": action_id,
+                    "status": action_status.status,
+                },
+            )
             raise ActionConflict("Cannot cancel complete action")
 
         action_status.status = ActionStatusValue.FAILED
@@ -239,7 +283,13 @@ def my_action_cancel(action_id: str, auth: AuthState) -> ActionCallbackReturn:
             status=action_status.status,
             display_status=action_status.display_status,
         )
-
+        logger.info(
+            "Action cancelled successfully",
+            extra={
+                "action_id": action_id,
+                "cancelled_by": auth.effective_identity,
+            },
+        )
         return action_status
 
 
@@ -251,9 +301,11 @@ def my_action_release(action_id: str, auth: AuthState) -> ActionCallbackReturn:
     operation marks the ActionStatus object as released in the data store.
     The final, up to date ActionStatus is returned after a successful release.
     """
+    logger.info("Releasing action", extra={"action_id": action_id})
     with get_db() as db:
         db_action = get_action_status(db, action_id)
         if db_action is None:
+            logger.warning("Action not found", extra={"action_id": action_id})
             raise ActionNotFound(f"No action with {action_id}")
 
         action_status = ActionStatus(
@@ -264,7 +316,11 @@ def my_action_release(action_id: str, auth: AuthState) -> ActionCallbackReturn:
             monitor_by=set(db_action.monitor_by.split(",")),
             manage_by=set(db_action.manage_by.split(",")),
             start_time=db_action.start_time.isoformat(),
-            completion_time=db_action.completion_time.isoformat() if db_action.completion_time else None,
+            completion_time=(
+                db_action.completion_time.replace(tzinfo=dt.timezone.utc).isoformat()
+                if db_action.completion_time
+                else None
+            ),
             release_after=db_action.release_after,
             display_status=db_action.display_status,
             details=json.loads(db_action.details) if db_action.details else {},
@@ -272,6 +328,13 @@ def my_action_release(action_id: str, auth: AuthState) -> ActionCallbackReturn:
 
         authorize_action_management_or_404(action_status, auth)
         if not action_status.is_complete():
+            logger.warning(
+                "Cannot release incomplete action",
+                extra={
+                    "action_id": action_id,
+                    "status": action_status.status,
+                },
+            )
             raise ActionConflict("Cannot release incomplete Action")
 
         action_status.display_status = f"Released by {auth.effective_identity}"
@@ -281,5 +344,12 @@ def my_action_release(action_id: str, auth: AuthState) -> ActionCallbackReturn:
             action_id=action_id,
             display_status=action_status.display_status,
             is_released=True,
+        )
+        logger.info(
+            "Action released successfully",
+            extra={
+                "action_id": action_id,
+                "released_by": auth.effective_identity,
+            },
         )
         return action_status

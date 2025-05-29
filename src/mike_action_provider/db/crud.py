@@ -1,11 +1,12 @@
 """CRUD operations for the action provider database."""
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+
+from typing import Optional, Dict, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mike_action_provider.db.models import ActionStatus
+from mike_action_provider.utils import utc_now
 
 
 def create_action_status(
@@ -46,7 +47,7 @@ def create_action_status(
         label=label,
         monitor_by=monitor_by,
         manage_by=manage_by,
-        start_time=datetime.now(),
+        start_time=utc_now(),
         release_after=release_after,
         display_status=display_status,
         details=details,

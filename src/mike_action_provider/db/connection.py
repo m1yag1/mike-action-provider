@@ -1,4 +1,5 @@
 """Database connection and session management."""
+
 from contextlib import contextmanager
 from typing import Generator
 
@@ -30,9 +31,7 @@ def init_db() -> None:
 
 
 # Create session factory
-SessionLocal = sessionmaker(
-    autocommit=False, autoflush=False, bind=get_engine()
-)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=get_engine())
 
 
 @contextmanager
